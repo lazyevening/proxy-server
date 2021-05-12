@@ -1,6 +1,5 @@
 import socket
 import threading
-from multiprocessing import Pool
 
 HOST_NAME = '127.0.0.1'
 BIND_PORT = 8080
@@ -16,7 +15,8 @@ def main():
         while True:
             client_socket, client_address = server_socket.accept()
             data = client_socket.recv(MAX_REQUEST_LEN)
-            conn_string(client_socket, data, client_address)
+            # conn_string(client_socket, data, client_address)
+            threading.Thread(target=conn_string, args=(client_socket, data, client_address)).start()
 
 
 def conn_string(client_socket, data, client_address):
@@ -33,36 +33,39 @@ def conn_string(client_socket, data, client_address):
     else:
         temp = url[http_pos + 3:]
     port_pos = temp.find(":")
-    webserver_pos = temp.find("/")
+    web_server_pos = temp.find("/")
     if port_pos == -1:
         port = 80
-        webserver = temp[:webserver_pos]
+        web_server = temp[:web_server_pos]
     else:
         port = int(temp[port_pos + 1:])
-        webserver = temp[:port_pos]
+        web_server = temp[:port_pos]
 
-    print("New connection:", webserver, port)
+    print("New connection:", web_server, port)
 
-    proxy_server(webserver, port, client_socket, data, client_address)
+    proxy_server(web_server, port, client_socket, data, client_address)
 
 
-def proxy_server(webserver, port, client_socket, data, client_address):
+def proxy_server(web_server, port, client_socket, data, client_address):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.connect((webserver, port))
+        sock.connect((web_server, port))
         sock.send(data.encode())
+        try:
+            while True:
+                reply = sock.recv(MAX_REQUEST_LEN)
+                if len(reply) > 0:
 
-        while True:
-            reply = sock.recv(MAX_REQUEST_LEN)
-            if len(reply) > 0:
-                try:
+                    print(reply)
                     client_socket.send(reply)
-                except ConnectionAbortedError as e:
-                    print("send exc", e)
-                    client_socket.close()
+
+                else:
+                    print("empty break")
                     break
-            else:
-                print("empty break")
-                break
+        except ConnectionAbortedError as e:
+            print("send exc", e)
+        except ConnectionResetError as e:
+            print(e)
+
     client_socket.close()
 
 
