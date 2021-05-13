@@ -1,14 +1,16 @@
 import socket
 import threading
+import ssl
 
 HOST_NAME = '127.0.0.1'
 BIND_PORT = 8080
 MAX_REQUEST_LEN = 2 ** 20
-MAX_CONN = 32
+MAX_CONN = 256
 
 
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST_NAME, BIND_PORT))
         server_socket.listen(MAX_CONN)
 
@@ -17,6 +19,7 @@ def main():
             data = client_socket.recv(MAX_REQUEST_LEN)
             # conn_string(client_socket, data, client_address)
             threading.Thread(target=conn_string, args=(client_socket, data, client_address)).start()
+            print(threading.active_count())
 
 
 def conn_string(client_socket, data, client_address):
@@ -24,8 +27,11 @@ def conn_string(client_socket, data, client_address):
         data = data.decode()
         first_line = data.splitlines()[0]
         url = first_line.split()[1]
+        method = first_line.split()[0]
     except IndexError:
         return
+    print(method)
+    is_http = method == 'CONNECT'
 
     http_pos = url.find("://")
     if http_pos == -1:
@@ -43,12 +49,15 @@ def conn_string(client_socket, data, client_address):
 
     print("New connection:", web_server, port)
 
-    proxy_server(web_server, port, client_socket, data, client_address)
+    proxy_server(web_server, port, client_socket, data, client_address, is_http)
 
 
-def proxy_server(web_server, port, client_socket, data, client_address):
+def proxy_server(web_server, port, client_socket, data, client_address, is_https):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect((web_server, port))
+        if is_https:
+            sock = ssl.wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE,
+                                   ssl_version=ssl.PROTOCOL_SSLv23)
         sock.send(data.encode())
         try:
             while True:
