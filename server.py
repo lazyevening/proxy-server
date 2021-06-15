@@ -1,82 +1,86 @@
 import socket
-import threading
-import ssl
+import socketserver
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+from select import select
+from time import sleep
+from urllib.request import urlopen
+from threading import Thread
 
-HOST_NAME = '127.0.0.1'
-BIND_PORT = 8080
-MAX_REQUEST_LEN = 2 ** 20
-MAX_CONN = 256
-
-
-def main():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind((HOST_NAME, BIND_PORT))
-        server_socket.listen(MAX_CONN)
-
-        while True:
-            client_socket, client_address = server_socket.accept()
-            data = client_socket.recv(MAX_REQUEST_LEN)
-            # conn_string(client_socket, data, client_address)
-            threading.Thread(target=conn_string, args=(client_socket, data, client_address)).start()
-            print(threading.active_count())
+PORT = 8080
+BLACKLIST = {
+    'reklama.e1.ru',
+    'googleadservices.com',
+    'doubleclick.net',
+    'reklama.ngs.ru',
+    'an.yandex.ru',
+    'mc.yandex.ru',
+    'mail.ru'
+}
+SOCKET_TIMEOUT = 0.5
+SOCKET_MAX_IDLE = 10
 
 
-def conn_string(client_socket, data, client_address):
-    try:
-        data = data.decode()
-        first_line = data.splitlines()[0]
-        url = first_line.split()[1]
-        method = first_line.split()[0]
-    except IndexError:
-        return
-    print(method)
-    is_http = method == 'CONNECT'
+class ProxyHandler(SimpleHTTPRequestHandler):
+    def do_CONNECT(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_sock:
+            path_parts = self.path.split(':')
+            host, port = path_parts[0], int(path_parts[-1])
+            try:
+                if ProxyHandler.is_blacklisted(host):
+                    self.send_error(423, 'Blacklisted host locked')
+                    return
+                client_sock.connect((host, port))
+                self.send_response(200, 'Connection established')
+                self.send_header('Proxy-agent', 'Test HTTP proxy')
+                self.end_headers()
+                socks = [self.connection, client_sock]
+                self.socket_idle = 0
+                while True:
+                    input_ready, output_ready, exception_ready = select(socks, [], socks, 0.1)
+                    if exception_ready:
+                        return
+                    if input_ready:
+                        for item in input_ready:
+                            data = item.recv(8192)
+                            if data:
+                                current_sock = self.connection if item is client_sock else client_sock
+                                current_sock.send(data)
+                            elif self._socket_max_idle:
+                                return
+                    elif self._socket_max_idle:
+                        return
+            except socket.error:
+                self.send_error(404, 'Not found')
+            except ConnectionError:
+                pass
+            finally:
+                self.connection.close()
 
-    http_pos = url.find("://")
-    if http_pos == -1:
-        temp = url
-    else:
-        temp = url[http_pos + 3:]
-    port_pos = temp.find(":")
-    web_server_pos = temp.find("/")
-    if port_pos == -1:
-        port = 80
-        web_server = temp[:web_server_pos]
-    else:
-        port = int(temp[port_pos + 1:])
-        web_server = temp[:port_pos]
+    def do_GET(self):
+        self.copyfile(urlopen(self.path), self.wfile)
 
-    print("New connection:", web_server, port)
+    @property
+    def _socket_max_idle(self):
+        if self.socket_idle < SOCKET_MAX_IDLE:
+            sleep(SOCKET_TIMEOUT)
+            self.socket_idle += 1
+            return False
+        else:
+            return True
 
-    proxy_server(web_server, port, client_socket, data, client_address, is_http)
+    @staticmethod
+    def is_blacklisted(host):
+        for item in BLACKLIST:
+            if item in host:
+                return True
+        return False
 
 
-def proxy_server(web_server, port, client_socket, data, client_address, is_https):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.connect((web_server, port))
-        if is_https:
-            sock = ssl.wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE,
-                                   ssl_version=ssl.PROTOCOL_SSLv23)
-        sock.send(data.encode())
-        try:
-            while True:
-                reply = sock.recv(MAX_REQUEST_LEN)
-                if len(reply) > 0:
-
-                    print(reply)
-                    client_socket.send(reply)
-
-                else:
-                    print("empty break")
-                    break
-        except ConnectionAbortedError as e:
-            print("send exc", e)
-        except ConnectionResetError as e:
-            print(e)
-
-    client_socket.close()
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    pass
 
 
 if __name__ == '__main__':
-    main()
+    server = ThreadedTCPServer(('', PORT), ProxyHandler)
+    thread = Thread(target=server.serve_forever)
+    thread.start()
